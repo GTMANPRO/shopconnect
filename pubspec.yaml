@@ -14,13 +14,36 @@ dependencies:
   firebase_core: ^4.4.0
   cloud_firestore: ^6.1.2
   url_launcher: ^6.3.2
+  shared_preferences: ^2.5.5
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^5.0.0
+  flutter_launcher_icons: ^0.13.1
+  flutter_native_splash: ^2.4.7
 
 flutter:
   uses-material-design: true
   assets:
     - assets/logos/
+    - assets/icon/app_icon.png
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  web:
+    generate: true
+  image_path: "assets/icon/app_icon.png"
+  adaptive_icon_background: "#6D28D9"
+  remove_alpha_ios: true
+
+flutter_native_splash:
+  color: "#6D28D9"
+  image: assets/icon/app_icon.png
+  android: true
+  ios: true
+  web: true
+  android_12:
+    color: "#6D28D9"
+    image: assets/icon/app_icon.png

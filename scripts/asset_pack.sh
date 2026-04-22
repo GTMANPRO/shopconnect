@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
-# GLOBAL‑ANYWHERE VERSION — always run from your project root
-PROJECT_ROOT="/Users/gt/Projects/shopconnect"
-
-# Always switch to project root before doing anything
-cd "$PROJECT_ROOT"
+# Always run from the repo root in CI
+PROJECT_ROOT="$(pwd)"
 
 echo "📂 Project root: $PROJECT_ROOT"
 

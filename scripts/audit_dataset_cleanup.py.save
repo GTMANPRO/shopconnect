@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+STORE_PATH = ROOT / 'assets' / 'data' / 'stores.json'
+OUT = ROOT / 'dataset_cleanup_report.txt'
+
+PRIORITY_CATEGORIES = {'finance', 'travel', 'beauty', 'electronics'}
+
+
+def good(v):
+STORE_PATH = Path(__file__).resolve().parents[1] / 'assets' / 'data' / 
+'stores.json'    return isinstance(v, str) and 
+v.strip().startswith('http')
+
+
+def parse_categories(raw):
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    return [x.strip() for x in str(raw).split('|') if x.strip()]
+
+
+def main():
+    stores = json.loads(STORE_PATH.read_text(encoding='utf-8'))
+    lines = []
+    lines.append('SHOPCONNECT DATASET CLEANUP REPORT')
+    lines.append('')
+    lines.append(f'Total stores: {len(stores)}')
+    lines.append('')
+
+    missing_links = []
+    missing_logo = []
+    priority_missing = []
+
+    for s in stores:
+        sid = str(s.get('id', '')).strip()
+        name = str(s.get('name', '')).strip()
+        cats = parse_categories(s.get('categories') or s.get('category'))
+        aff = s.get('affiliateUrl')
+        out = s.get('outboundUrl')
+        logo = s.get('logoUrl')
+        row = (sid, name, cats)
+        if not good(aff) and not good(out):
+            missing_links.append(row)
+            if any(c in PRIORITY_CATEGORIES for c in cats):
+                priority_missing.append(row)
+        if not good(logo):
+            missing_logo.append(row)
+
+    lines.append(f'Stores missing affiliateUrl and outboundUrl: {len(missing_links)}')
+    for sid, name, cats in missing_links[:250]:
+        lines.append(f'- {sid} | {name} | {"|".join(cats)}')
+    lines.append('')
+    lines.append(f'Priority-category stores missing links: {len(priority_missing)}')
+    for sid, name, cats in priority_missing[:150]:
+        lines.append(f'- {sid} | {name} | {"|".join(cats)}')
+    lines.append('')
+    lines.append(f'Stores missing logoUrl: {len(missing_logo)}')
+    for sid, name, cats in missing_logo[:150]:
+        lines.append(f'- {sid} | {name} | {"|".join(cats)}')
+
+    OUT.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    print(f'Wrote {OUT}')
+
+
+if __name__ == '__main__':
+    main()

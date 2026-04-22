@@ -1,0 +1,241 @@
+
+/* eslint-disable no-console */
+const fs = require('fs');
+const path = require('path');
+
+async function main() {
+  const root = process.cwd();
+  const firebase = await import('firebase/app');
+  const firestorePkg = await import('firebase/firestore');
+  const { initializeApp, getApps } = firebase;
+  const {
+    getFirestore,
+    collection,
+    getDocs,
+    query,
+    where,
+  } = firestorePkg;
+
+  const firebaseOptionsPath = path.join(root, 'lib', 'firebase_options.dart');
+  const overridesPath = path.join(root, 'lib', 'data', 'monetization_overrides.dart');
+  const routerPath = path.join(root, 'lib', 'services', 'monetization_router.dart');
+
+  if (!fs.existsSync(firebaseOptionsPath)) {
+    console.error('Missing lib/firebase_options.dart');
+    process.exit(1);
+  }
+  if (!fs.existsSync(overridesPath)) {
+    console.error('Missing lib/data/monetization_overrides.dart');
+    process.exit(1);
+  }
+  if (!fs.existsSync(routerPath)) {
+    console.error('Missing lib/services/monetization_router.dart');
+    process.exit(1);
+  }
+
+  const config = parseFlutterFireWebConfig(fs.readFileSync(firebaseOptionsPath, 'utf8'));
+  if (!config.projectId || !config.apiKey || !config.appId) {
+    console.error('Could not parse web Firebase config from lib/firebase_options.dart');
+    process.exit(1);
+  }
+
+  const app = getApps().length ? getApps()[0] : initializeApp(config);
+  const db = getFirestore(app);
+
+  const overridesSource = fs.readFileSync(overridesPath, 'utf8').toLowerCase();
+  const routerSource = fs.readFileSync(routerPath, 'utf8').toLowerCase();
+  const routingCorpus = `${overridesSource}\n${routerSource}`;
+
+  const q = query(collection(db, 'stores'), where('active', '==', true));
+  const snap = await getDocs(q);
+
+  const stores = [];
+  snap.forEach((doc) => {
+    const d = doc.data() || {};
+    const categories = Array.isArray(d.categories)
+      ? d.categories.map(v => String(v || '').trim()).filter(Boolean)
+      : (d.categoryId ? [String(d.categoryId).trim()] : []);
+    stores.push({
+      id: doc.id,
+      name: String(d.name || '').trim(),
+      primaryCategory: categories[0] || '',
+      categories,
+      affiliateUrl: String(d.affiliateUrl || '').trim(),
+      outboundUrl: String(d.outboundUrl || '').trim(),
+      logoUrl: String(d.logoUrl || '').trim(),
+      active: d.active !== false,
+      featured: d.featured === true,
+      network: String(d.network || '').trim(),
+    });
+  });
+
+  stores.sort((a, b) => a.name.localeCompare(b.name));
+
+  const evaluated = stores.map(store => evaluateStore(store, routingCorpus));
+
+  const byCategory = {};
+  for (const s of evaluated) {
+    const key = s.primaryCategory || 'uncategorized';
+    if (!byCategory[key]) {
+      byCategory[key] = { total: 0, likelyCovered: 0, likelyFallback: 0, missingAffiliate: 0, stores: [] };
+    }
+    byCategory[key].total += 1;
+    if (s.likelyCovered) byCategory[key].likelyCovered += 1;
+    if (s.likelyFallback) byCategory[key].likelyFallback += 1;
+    if (!s.hasDirectUrl) byCategory[key].missingAffiliate += 1;
+    byCategory[key].stores.push(s);
+  }
+
+  const likelyFallbackStores = evaluated.filter(s => s.likelyFallback);
+  const suspiciousStores = evaluated.filter(s => s.suspicious);
+
+  const report = {
+    generatedAt: new Date().toISOString(),
+    projectRoot: root,
+    firebaseProjectId: config.projectId,
+    totals: {
+      activeStores: evaluated.length,
+      likelyCovered: evaluated.filter(s => s.likelyCovered).length,
+      likelyFallback: likelyFallbackStores.length,
+      suspicious: suspiciousStores.length,
+    },
+    byCategory,
+    likelyFallbackStores,
+    suspiciousStores,
+  };
+
+  const tmpDir = path.join(root, 'tmp');
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  const jsonPath = path.join(tmpDir, 'live_firestore_routing_audit_report.json');
+  fs.writeFileSync(jsonPath, JSON.stringify(report, null, 2));
+
+  const csvPath = path.join(tmpDir, 'live_firestore_routing_fallbacks.csv');
+  fs.writeFileSync(csvPath, toCsv(likelyFallbackStores));
+
+  console.log(`Active stores: ${evaluated.length}`);
+  console.log(`Likely covered: ${report.totals.likelyCovered}`);
+  console.log(`Likely fallback/search risk: ${report.totals.likelyFallback}`);
+  console.log(`Suspicious routing cases: ${report.totals.suspicious}`);
+  console.log('');
+
+  Object.keys(byCategory).sort().forEach((cat) => {
+    const c = byCategory[cat];
+    console.log(`${cat}: ${c.total} active, ${c.likelyCovered} likely covered, ${c.likelyFallback} likely fallback`);
+    c.stores
+      .filter(s => s.likelyFallback)
+      .slice(0, 20)
+      .forEach((s) => {
+        console.log(`  - ${s.id} | ${s.name}`);
+      });
+    if (c.likelyFallback > 20) {
+      console.log(`  ... and ${c.likelyFallback - 20} more`);
+    }
+    console.log('');
+  });
+
+  console.log(`Saved JSON report: ${jsonPath}`);
+  console.log(`Saved CSV report: ${csvPath}`);
+}
+
+function parseFlutterFireWebConfig(source) {
+  const webBlockMatch = source.match(/static const FirebaseOptions web\s*=\s*FirebaseOptions\(([\s\S]*?)\);\s*/m);
+  if (!webBlockMatch) return {};
+  const block = webBlockMatch[1];
+  const keys = ['apiKey', 'appId', 'messagingSenderId', 'projectId', 'authDomain', 'storageBucket', 'measurementId'];
+  const out = {};
+  for (const key of keys) {
+    const m = block.match(new RegExp(String.raw`${key}\s*:\s*'([^']*)'`));
+    if (m) out[key] = m[1];
+  }
+  return out;
+}
+
+function normalize(v) {
+  return String(v || '')
+    .toLowerCase()
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function tokensForStore(store) {
+  const out = new Set();
+  const add = (v) => {
+    const n = normalize(v);
+    if (n) out.add(n);
+  };
+  add(store.id);
+  add(store.name);
+  add(store.primaryCategory);
+  String(store.name || '').split(/\s+/).forEach(add);
+
+  const specials = [
+    ['bj\'s wholesale club', ['bjs', 'bjswholesaleclub']],
+    ['sam\'s club', ['samsclub', 'sams']],
+    ['dick\'s sporting goods', ['dicks', 'dickssportinggoods']],
+    ['h&m', ['hm']],
+    ['e.l.f. cosmetics', ['elf', 'elfcosmetics']],
+    ['booking.com', ['booking', 'bookingcom']],
+    ['hotels.com', ['hotels', 'hotelscom']],
+    ['under armour', ['underarmour']],
+    ['airbnb', ['airbnb']],
+    ['groupon', ['groupon']],
+    ['rakuten', ['rakuten']],
+    ['saks fifth avenue', ['saksfifthavenue', 'saks']],
+    ['world market', ['worldmarket']],
+  ];
+  for (const [name, aliases] of specials) {
+    if (normalize(store.name) === normalize(name) || normalize(store.id) === normalize(name)) {
+      aliases.forEach(add);
+    }
+  }
+  return [...out];
+}
+
+function evaluateStore(store, routingCorpus) {
+  const tokens = tokensForStore(store);
+  const tokenMatches = tokens.filter(t => t && routingCorpus.includes(t));
+  const hasDirectUrl = Boolean(store.affiliateUrl || store.outboundUrl);
+  const likelyCovered = hasDirectUrl || tokenMatches.length > 0;
+  const likelyFallback = !hasDirectUrl && tokenMatches.length === 0;
+  const suspicious = !hasDirectUrl && tokenMatches.length > 0;
+  return {
+    ...store,
+    hasDirectUrl,
+    tokenMatches,
+    likelyCovered,
+    likelyFallback,
+    suspicious,
+  };
+}
+
+function csvEscape(v) {
+  const s = String(v == null ? '' : v);
+  if (/[,"\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function toCsv(rows) {
+  const headers = [
+    'id',
+    'name',
+    'primaryCategory',
+    'affiliateUrl',
+    'outboundUrl',
+    'hasDirectUrl',
+    'likelyCovered',
+    'likelyFallback',
+    'suspicious',
+    'tokenMatches',
+  ];
+  const lines = [headers.join(',')];
+  for (const r of rows) {
+    lines.push(headers.map(h => csvEscape(Array.isArray(r[h]) ? r[h].join('|') : r[h])).join(','));
+  }
+  return lines.join('\n');
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
